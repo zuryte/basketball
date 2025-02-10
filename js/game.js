@@ -54,6 +54,11 @@ class BasketballGame {
         // Event listeners
         this.setupEventListeners();
         
+        // Add clock for delta time calculation
+        this.clock = new THREE.Clock();
+        this.fixedTimeStep = 1/60;  // Fixed time step for physics (60 Hz)
+        this.maxSubSteps = 3;       // Maximum number of substeps per frame
+
         // Start game loop
         this.animate();
     }
@@ -372,18 +377,89 @@ class BasketballGame {
         poleBody.position.set(0, 3, -9.5);
         this.world.addBody(poleBody);
 
-        // Rim physics (using a collection of small boxes)
-        const rimSegments = 8;
+        // Create rim physics using a compound shape
+        const rimBody = new CANNON.Body({ mass: 0 });
+        
+        // Create rim segments using a torus approximation
+        const rimSegments = 16;
+        const rimRadius = 0.45;
+        const rimTubeRadius = 0.04;
+        
         for (let i = 0; i < rimSegments; i++) {
             const angle = (i / rimSegments) * Math.PI * 2;
-            const rimSegmentShape = new CANNON.Box(new CANNON.Vec3(0.04, 0.04, 0.04));
-            const rimSegmentBody = new CANNON.Body({ mass: 0 });
-            rimSegmentBody.addShape(rimSegmentShape);
-            const x = Math.cos(angle) * 0.45;
-            const z = Math.sin(angle) * 0.45 - 8.5;
-            rimSegmentBody.position.set(x, 2.5, z);
-            this.world.addBody(rimSegmentBody);
+            const nextAngle = ((i + 1) / rimSegments) * Math.PI * 2;
+            
+            // Create a box between current angle and next angle
+            const midAngle = (angle + nextAngle) / 2;
+            const segmentLength = 2 * rimRadius * Math.sin(Math.PI / rimSegments);
+            
+            const segmentShape = new CANNON.Box(new CANNON.Vec3(
+                segmentLength / 2,
+                rimTubeRadius,
+                rimTubeRadius
+            ));
+            
+            // Position and rotate the segment
+            const offset = new CANNON.Vec3(
+                rimRadius * Math.cos(midAngle),
+                0,
+                rimRadius * Math.sin(midAngle)
+            );
+            
+            const segmentRotation = new CANNON.Quaternion();
+            segmentRotation.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), -midAngle);
+            
+            rimBody.addShape(segmentShape, offset, segmentRotation);
         }
+        
+        rimBody.position.set(0, 2.5, -8.5);
+        this.world.addBody(rimBody);
+        this.rimBody = rimBody;  // Store reference for collision detection
+
+        // Create trigger volumes for score detection
+        const topTriggerShape = new CANNON.Cylinder(0.45, 0.45, 0.1, 16);
+        this.topTrigger = new CANNON.Body({
+            isTrigger: true,
+            mass: 0,
+            shape: topTriggerShape,
+            collisionResponse: false  // This makes it a ghost object that doesn't affect physics
+        });
+        this.topTrigger.position.set(0, 2.6, -8.5);  // Slightly above rim
+        this.world.addBody(this.topTrigger);
+
+        const bottomTriggerShape = new CANNON.Cylinder(0.45, 0.45, 0.1, 16);
+        this.bottomTrigger = new CANNON.Body({
+            isTrigger: true,
+            mass: 0,
+            shape: bottomTriggerShape,
+            collisionResponse: false  // This makes it a ghost object that doesn't affect physics
+        });
+        this.bottomTrigger.position.set(0, 2.4, -8.5);  // Slightly below rim
+        this.world.addBody(this.bottomTrigger);
+
+        // Set up collision detection for scoring
+        this.ballAboveRim = false;
+        this.ballBelowRim = false;
+        
+        // Add contact event listeners
+        this.world.addEventListener('beginContact', (event) => {
+            if ((event.bodyA === this.ballBody && event.bodyB === this.topTrigger) ||
+                (event.bodyB === this.ballBody && event.bodyA === this.topTrigger)) {
+                this.ballAboveRim = true;
+            }
+            if ((event.bodyA === this.ballBody && event.bodyB === this.bottomTrigger) ||
+                (event.bodyB === this.ballBody && event.bodyA === this.bottomTrigger)) {
+                this.ballBelowRim = true;
+                // Check for scoring
+                if (this.ballAboveRim && !this.ballPassedThroughHoop && this.ballBody.velocity.y < 0) {
+                    this.ballPassedThroughHoop = true;
+                    this.score += this.isThreePointer() ? 3 : 2;
+                    this.scoreDisplay.textContent = this.score;
+                    this.updateScoreboardDisplay();
+                    this.createScoreEffect();
+                }
+            }
+        });
     }
 
     setupPlayer() {
@@ -402,7 +478,7 @@ class BasketballGame {
         // Head with neck
         const headGeometry = new THREE.SphereGeometry(0.15, 16, 16);
         const skinMaterial = new THREE.MeshStandardMaterial({ 
-            color: 0x8d5524,  // Darker skin tone
+            color: 0xe8c39e,  // More natural Asian skin tone, less yellow
             roughness: 0.8,
             metalness: 0.1
         });
@@ -604,32 +680,29 @@ class BasketballGame {
         this.animateShot();
         this.isShot = true;
 
-        // Calculate direction to basket (at rim position)
+        // Calculate direction to basket (at rim position) from ball's current position
         const basketPosition = new THREE.Vector3(0, 2.5, -8.5);
+        const ballPosition = new THREE.Vector3(
+            this.ballBody.position.x,
+            this.ballBody.position.y,
+            this.ballBody.position.z
+        );
         const shotDirection = new THREE.Vector3();
-        shotDirection.subVectors(basketPosition, this.playerState.position).normalize();
+        shotDirection.subVectors(basketPosition, ballPosition).normalize();
 
-        // Calculate distance to basket
+        // Calculate distance to basket from ball's position
         const distanceToBasket = new THREE.Vector2(
-            this.playerState.position.x - basketPosition.x,
-            this.playerState.position.z - basketPosition.z
+            ballPosition.x - basketPosition.x,
+            ballPosition.z - basketPosition.z
         ).length();
 
         // Get the release quality which affects power
         const releaseQuality = this.calculateReleaseQuality(distanceToBasket);
-        
-        // Calculate distance-based compensation
-        const BASE_DISTANCE = 5; // Reference distance for normalization
-        const MAX_COMPENSATION = 1.15; // Maximum power compensation
-        
-        // Smooth scaling based on distance ratio, with a cap
-        const distanceRatio = distanceToBasket / BASE_DISTANCE;
-        const distanceCompensation = Math.min(MAX_COMPENSATION, 1 + Math.log10(distanceRatio) * 0.1);
 
         // Using projectile motion equation for perfect velocity:
         // v0^2 = (g * d^2) / (2 * cos^2(θ) * (d * tan(θ) - (h - h0)))
         const g = 9.81; // gravity (m/s^2)
-        const h0 = this.playerState.position.y + 1.4; // initial height (player's hands)
+        const h0 = ballPosition.y; // initial height (ball's current height)
         const h = basketPosition.y; // target height (basket)
         const d = distanceToBasket; // horizontal distance to target
 
@@ -639,8 +712,8 @@ class BasketballGame {
             (d * Math.tan(releaseQuality.optimalAngle) - (h - h0)))
         );
         
-        // Apply power multiplier with distance compensation
-        const actualVelocity = perfectVelocity * releaseQuality.powerMultiplier * distanceCompensation;
+        // Apply power multiplier based on release quality only
+        const actualVelocity = perfectVelocity * releaseQuality.powerMultiplier;
         
         // Calculate velocity components
         const vx = actualVelocity * Math.cos(releaseQuality.optimalAngle);
@@ -715,8 +788,8 @@ class BasketballGame {
         
         // Calculate optimal angle based on distance
         // Closer shots need steeper angles
-        const baseAngle = Math.PI / 4; // 45 degrees base
-        const optimalAngle = baseAngle + Math.min(0.2, distanceToBasket * 0.01); // Slight angle adjustment for distance
+        const baseAngle = Math.PI / 3; // Changed from Math.PI / 4 to Math.PI / 3 (60 degrees base instead of 45)
+        const optimalAngle = baseAngle + Math.min(0.3, distanceToBasket * 0.015); // Increased angle adjustment for distance
         
         return {
             isPerfect: false,
@@ -824,29 +897,20 @@ class BasketballGame {
     }
 
     checkScore() {
+        // Score detection is now handled by physics triggers in setupHoop
+        // Just reset the ball state when it's far from the hoop
         if (this.isShot && !this.ballPassedThroughHoop) {
             const ballPos = this.ball.position;
             const rimPos = this.rim.position;
+            const distanceFromHoop = Math.sqrt(
+                Math.pow(ballPos.x - rimPos.x, 2) +
+                Math.pow(ballPos.z - rimPos.z, 2)
+            );
             
-            // Check if ball is within rim radius
-            const isWithinRimRadius = Math.abs(ballPos.x - rimPos.x) < 0.45 &&
-                                    Math.abs(ballPos.z - rimPos.z) < 0.45;
-            
-            // Check if ball is at rim height
-            const isAtRimHeight = Math.abs(ballPos.y - rimPos.y) < 0.1;
-            
-            // Track if ball is above rim
-            if (isWithinRimRadius && ballPos.y > rimPos.y + 0.1) {
-                this.ballAboveRim = true;
-            }
-            
-            // Only score if ball was above rim first and is now passing through
-            if (this.ballAboveRim && isWithinRimRadius && isAtRimHeight && this.ballBody.velocity.y < 0) {
-                this.ballPassedThroughHoop = true;
-                this.score += this.isThreePointer() ? 3 : 2;
-                this.scoreDisplay.textContent = this.score;
-                this.updateScoreboardDisplay();
-                this.createScoreEffect();
+            // Reset detection state if ball is far from hoop
+            if (distanceFromHoop > 2) {
+                this.ballAboveRim = false;
+                this.ballBelowRim = false;
             }
         }
     }
@@ -861,24 +925,24 @@ class BasketballGame {
 
     createScoreEffect() {
         const isThree = this.isThreePointer();
-        const particleCount = 50;
+        const particleCount = 100;  // Increased from 50 to 100 particles
         const particleGeometry = new THREE.BufferGeometry();
         const particlePositions = new Float32Array(particleCount * 3);
         const particleVelocities = [];
         
-        // Create particles around the rim position
+        // Create particles around the rim position with wider spread
         for (let i = 0; i < particleCount; i++) {
             const angle = (Math.random() * Math.PI * 2);
-            const radius = Math.random() * 0.5;
+            const radius = Math.random() * 1.2;  // Increased from 0.5 to 1.2 for wider spread
             particlePositions[i * 3] = this.rim.position.x + Math.cos(angle) * radius;
             particlePositions[i * 3 + 1] = this.rim.position.y;
             particlePositions[i * 3 + 2] = this.rim.position.z + Math.sin(angle) * radius;
             
-            // Random velocities for particle movement
+            // Increased velocities for more dramatic movement
             particleVelocities.push({
-                x: (Math.random() - 0.5) * 0.2,
-                y: Math.random() * 0.2,
-                z: (Math.random() - 0.5) * 0.2
+                x: (Math.random() - 0.5) * 0.4,  // Doubled from 0.2
+                y: Math.random() * 0.4,          // Doubled from 0.2
+                z: (Math.random() - 0.5) * 0.4   // Doubled from 0.2
             });
         }
         
@@ -886,15 +950,16 @@ class BasketballGame {
         
         const particleMaterial = new THREE.PointsMaterial({
             color: isThree ? 0xff0000 : 0xffffff,
-            size: 0.05,
+            size: 0.12,  // Increased from 0.05 to 0.12
             transparent: true,
-            opacity: 1
+            opacity: 1,
+            blending: THREE.AdditiveBlending  // Added for more dramatic effect
         });
         
         const particles = new THREE.Points(particleGeometry, particleMaterial);
         this.scene.add(particles);
         
-        // Animate particles
+        // Animate particles with slower fade for longer effect
         const startTime = Date.now();
         const animate = () => {
             const positions = particleGeometry.attributes.position.array;
@@ -906,14 +971,14 @@ class BasketballGame {
                 positions[i * 3 + 1] += particleVelocities[i].y;
                 positions[i * 3 + 2] += particleVelocities[i].z;
                 
-                // Add gravity effect
-                particleVelocities[i].y -= 0.01;
+                // Reduced gravity for slower falling
+                particleVelocities[i].y -= 0.008;  // Reduced from 0.01
             }
             
             particleGeometry.attributes.position.needsUpdate = true;
-            particleMaterial.opacity = Math.max(0, 1 - elapsed);
+            particleMaterial.opacity = Math.max(0, 1 - elapsed * 0.7);  // Slower fade out
             
-            if (elapsed < 1) {
+            if (elapsed < 1.5) {  // Increased duration from 1 to 1.5 seconds
                 requestAnimationFrame(animate);
             } else {
                 this.scene.remove(particles);
@@ -965,31 +1030,32 @@ class BasketballGame {
         this.ballPassedThroughHoop = false;
     }
 
-    updatePlayer(delta) {
-        // Handle player movement
-        const wasMoving = this.keys.left || this.keys.right || this.keys.up || this.keys.down;
+    updatePlayer(deltaTime) {
+        // Handle player movement with delta time
+        const moveSpeed = 5; // Base movement speed in units per second
         
         if (this.keys.left) {
-            this.playerState.position.x -= 5 * delta;
+            this.playerState.position.x -= moveSpeed * deltaTime;
             this.player.rotation.y = Math.PI / 2; // Face left
         }
         if (this.keys.right) {
-            this.playerState.position.x += 5 * delta;
+            this.playerState.position.x += moveSpeed * deltaTime;
             this.player.rotation.y = -Math.PI / 2; // Face right
         }
         if (this.keys.up) {
-            this.playerState.position.z -= 5 * delta;
+            this.playerState.position.z -= moveSpeed * deltaTime;
             this.player.rotation.y = 0; // Face forward
         }
         if (this.keys.down) {
-            this.playerState.position.z += 5 * delta;
+            this.playerState.position.z += moveSpeed * deltaTime;
             this.player.rotation.y = Math.PI; // Face backward
         }
 
-        // Handle jumping
+        // Handle jumping with proper delta time
         if (this.playerState.isJumping) {
-            this.playerState.velocity.y += -20 * delta; // Gravity
-            this.playerState.position.y += this.playerState.velocity.y * delta;
+            const gravity = -20; // Gravity acceleration in units per second squared
+            this.playerState.velocity.y += gravity * deltaTime;
+            this.playerState.position.y += this.playerState.velocity.y * deltaTime;
             
             // Check for ground collision
             if (this.playerState.position.y <= 0) {
@@ -1072,16 +1138,20 @@ class BasketballGame {
     animate() {
         requestAnimationFrame(() => this.animate());
 
-        const delta = 1/60;  // Fixed time step
+        // Calculate delta time
+        const deltaTime = Math.min(this.clock.getDelta(), 0.1); // Cap at 100ms to prevent huge jumps
 
-        // Update power meter with smoother increment
+        // Update power meter with proper delta time
         if (this.isPoweringUp) {
-            this.shotMeterProgress = Math.min(1, this.shotMeterProgress + this.shotMeterSpeed * delta);
+            this.shotMeterProgress = Math.min(1, this.shotMeterProgress + this.shotMeterSpeed * deltaTime);
             this.shotMeterFill.style.height = `${this.shotMeterProgress * 100}%`;
         }
 
+        // Step physics with proper interpolation
+        this.world.step(this.fixedTimeStep, deltaTime, this.maxSubSteps);
+        
         this.updatePhysics();
-        this.updatePlayer(delta);
+        this.updatePlayer(deltaTime);
         this.checkScore();
         this.renderer.render(this.scene, this.camera);
     }
