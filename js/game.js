@@ -398,6 +398,18 @@ class BasketballGame {
         this.rightFoot.position.set(0.15, 0.15, 0.02);
         this.rightFoot.castShadow = true;
 
+        // Add arms for shooting animation
+        const armGeometry = new THREE.CylinderGeometry(0.05, 0.05, 0.4, 8);
+        this.rightArm = new THREE.Mesh(armGeometry, jerseyMaterial);
+        this.rightArm.position.set(0.35, 1.4, 0);
+        this.rightArm.rotation.z = -Math.PI / 3;  // Default arm position
+        this.rightArm.castShadow = true;
+
+        this.leftArm = new THREE.Mesh(armGeometry, jerseyMaterial);
+        this.leftArm.position.set(-0.35, 1.4, 0);
+        this.leftArm.rotation.z = Math.PI / 3;  // Default arm position
+        this.leftArm.castShadow = true;
+
         // Create player group and add all parts
         this.player = new THREE.Group();
         this.player.add(this.playerBody);
@@ -409,6 +421,8 @@ class BasketballGame {
         this.player.add(this.rightLowerLeg);
         this.player.add(this.leftFoot);
         this.player.add(this.rightFoot);
+        this.player.add(this.leftArm);
+        this.player.add(this.rightArm);
         
         // Position the entire player at ground level
         this.player.position.set(0, 0, 0);
@@ -488,7 +502,7 @@ class BasketballGame {
         });
         
         this.scoreboardDisplay = new THREE.Mesh(displayGeometry, displayMaterial);
-        this.scoreboardDisplay.position.set(0, 8, -14.7);
+        this.scoreboardDisplay.position.set(0, 8, -14.69); // Moved slightly forward from the scoreboard
         this.scene.add(this.scoreboardDisplay);
         
         this.updateScoreboardDisplay();
@@ -523,113 +537,141 @@ class BasketballGame {
     shoot() {
         if (this.isShot) return;
 
-        // Calculate release quality based on shot meter progress
-        const releaseQuality = this.calculateReleaseQuality();
-        
         // Start shooting animation
         this.playerState.shootingAnimation = true;
         this.animateShot();
-
-        const direction = new CANNON.Vec3();
-        const rimPos = this.rim.position;
-        const ballPos = this.ball.position;
-        
-        // Calculate distance to rim
-        const distanceToRim = Math.sqrt(
-            Math.pow(rimPos.x - ballPos.x, 2) + 
-            Math.pow(rimPos.z - ballPos.z, 2)
-        );
-        
-        // Calculate shooting angle based on distance and release quality
-        const baseAngle = Math.PI / 4 + (distanceToRim * 0.02);
-        const angle = baseAngle + (releaseQuality.angleOffset || 0);
-        
-        // Power is now based on shot meter progress and release quality
-        const powerMultiplier = Math.min(1, this.shotMeterProgress) * releaseQuality.powerMultiplier;
-        
-        // Calculate forward and upward components with added variation based on release
-        const forwardSpeed = 12 * powerMultiplier;
-        const upwardSpeed = forwardSpeed * Math.tan(angle);
-        
-        // Get shooting direction based on player orientation and target
-        const shootingDirection = new THREE.Vector3();
-        const toHoop = new THREE.Vector3(
-            rimPos.x - ballPos.x,
-            0,
-            rimPos.z - ballPos.z
-        ).normalize();
-
-        // Set initial direction based on player orientation
-        if (this.player.rotation.y === Math.PI / 2) {
-            shootingDirection.set(-1, 0, 0);
-        } else if (this.player.rotation.y === -Math.PI / 2) {
-            shootingDirection.set(1, 0, 0);
-        } else if (this.player.rotation.y === Math.PI) {
-            shootingDirection.set(0, 0, 1);
-        } else {
-            shootingDirection.set(0, 0, -1);
-        }
-
-        // Adjust aim assist based on release quality
-        const aimAssist = releaseQuality.isPerfect ? 0.9 : 0.7;
-        shootingDirection.lerp(toHoop, aimAssist);
-        
-        // Set final velocity with some randomness based on release quality
-        const accuracyVariation = releaseQuality.isPerfect ? 0.1 : 0.3;
-        direction.set(
-            shootingDirection.x * forwardSpeed * (1 + (Math.random() - 0.5) * accuracyVariation),
-            upwardSpeed * (1 + (Math.random() - 0.5) * accuracyVariation),
-            shootingDirection.z * forwardSpeed * (1 + (Math.random() - 0.5) * accuracyVariation)
-        );
-        
-        // Apply velocity to the ball
-        this.ballBody.velocity.copy(direction);
-        this.ballBody.angularVelocity.set(
-            (Math.random() - 0.5) * 5 * releaseQuality.spinMultiplier,
-            (Math.random() - 0.5) * 5 * releaseQuality.spinMultiplier,
-            (Math.random() - 0.5) * 5 * releaseQuality.spinMultiplier
-        );
-        
-        // Add screen shake for dramatic effect
-        if (releaseQuality.isPerfect) {
-            this.addScreenShake(0.2, 100);
-        }
-        
-        // Show release feedback
-        this.showReleaseIndicator(releaseQuality.isPerfect);
-        
         this.isShot = true;
-        this.shotMeter.style.display = 'none';
+
+        // Get the release quality which affects power
+        const releaseQuality = this.calculateReleaseQuality();
+        
+        // Base shot parameters - reduced speeds and power
+        const SHOT_SPEED = 12;  // Reduced from 15
+        const MIN_POWER = 0.3;  // Lower minimum power
+        const MAX_POWER = 0.9;  // Lower maximum power
+        const SHOT_HEIGHT = 5;  // Lower arc height
+        
+        // Calculate power from shot meter with a minimum, affected by release quality
+        const rawPower = this.shotMeterProgress;
+        const powerFactor = Math.max(MIN_POWER, 
+            Math.min(MAX_POWER, 
+                rawPower * releaseQuality.powerMultiplier
+            )
+        );
+        
+        // Calculate direction to basket (at rim position)
+        const basketPosition = new THREE.Vector3(0, 2.5, -8.5); // Rim position
+        const shotDirection = new THREE.Vector3();
+        shotDirection.subVectors(basketPosition, this.playerState.position).normalize();
+
+        // Calculate distance to basket for arc adjustment
+        const distanceToBasket = new THREE.Vector2(
+            this.playerState.position.x - basketPosition.x,
+            this.playerState.position.z - basketPosition.z
+        ).length();
+
+        // For perfect releases, ensure perfect trajectory
+        if (releaseQuality.isPerfect) {
+            // Calculate optimal trajectory for a perfect shot
+            const gravity = 9.82;
+            
+            // Calculate optimal time based on distance (longer distance = longer time)
+            const time = Math.sqrt(2 * distanceToBasket / 5);
+            
+            // Calculate required horizontal velocity to reach basket in calculated time
+            const horizontalSpeed = distanceToBasket / time;
+            
+            // Calculate required vertical velocity for perfect arc
+            // Using physics formula: y = v0*t - (1/2)gt^2
+            // At peak: 0 = v0*(t/2) - (1/2)g*(t/2)^2
+            // Solve for v0
+            const verticalSpeed = (gravity * time) / 2;
+            
+            // Set the final velocity for perfect shot
+            const velocity = new CANNON.Vec3(
+                shotDirection.x * horizontalSpeed,
+                verticalSpeed,
+                shotDirection.z * horizontalSpeed
+            );
+            
+            this.ballBody.velocity.copy(velocity);
+        } else {
+            // Only add spread for non-perfect releases
+            const tinySpread = 0.02;
+            shotDirection.x += (Math.random() - 0.5) * tinySpread;
+            shotDirection.z += (Math.random() - 0.5) * tinySpread;
+            shotDirection.normalize();
+            
+            // Scale down shot parameters based on power factor
+            const scaledShotSpeed = SHOT_SPEED * Math.pow(powerFactor, 1.5); // More aggressive power scaling
+            const scaledHeight = SHOT_HEIGHT * Math.pow(powerFactor, 1.5);   // Scale height with same curve
+            
+            // Calculate the shot arc with scaled parameters
+            const horizontalSpeed = scaledShotSpeed * (1 + distanceToBasket * 0.02);
+            const gravity = 9.82;
+            const verticalSpeed = Math.sqrt(2 * gravity * scaledHeight);
+            
+            // Set the final velocity
+            const velocity = new CANNON.Vec3(
+                shotDirection.x * horizontalSpeed,
+                verticalSpeed,
+                shotDirection.z * horizontalSpeed
+            );
+            
+            this.ballBody.velocity.copy(velocity);
+        }
+        
+        // Add minimal spin for visual effect
+        const spinForce = 1.5 * releaseQuality.spinMultiplier;  // Reduced spin
+        this.ballBody.angularVelocity.set(
+            0,
+            -spinForce,
+            0
+        );
+        
+        // Visual feedback
+        const isPerfect = releaseQuality.isPerfect;
+        this.showReleaseIndicator(isPerfect, powerFactor);
+        
+        // Screen shake for powerful shots
+        if (powerFactor > 0.8) {
+            this.addScreenShake(0.15 * powerFactor, 100);  // Reduced shake
+        }
     }
 
     calculateReleaseQuality() {
         const progress = this.shotMeterProgress;
         const isPerfect = progress >= this.perfectReleaseZone.start && progress <= this.perfectReleaseZone.end;
-        const isGood = progress >= 0.7 && progress <= 1;
         
         if (isPerfect) {
             return {
                 isPerfect: true,
                 powerMultiplier: 1,
-                spinMultiplier: 0.8,
-                angleOffset: 0,
-                accuracyBonus: 0.2
+                spinMultiplier: 1,
+                angleOffset: 0
             };
-        } else if (isGood) {
+        } else if (progress < this.perfectReleaseZone.start) {
+            // Linear scaling for early releases
+            // If released at 0, power is 0.1x
+            // If released just before perfect zone, power is 0.7x
+            const minPower = 0.1;
+            const maxPower = 0.7;
+            const powerScale = (progress / this.perfectReleaseZone.start);
+            const powerMultiplier = minPower + (maxPower - minPower) * powerScale;
+            
             return {
                 isPerfect: false,
-                powerMultiplier: 0.9,
-                spinMultiplier: 1,
-                angleOffset: (Math.random() - 0.5) * 0.1,
-                accuracyBonus: 0
+                powerMultiplier: powerMultiplier,
+                spinMultiplier: 0.6,
+                angleOffset: 0
             };
         } else {
+            // Late release (after perfect zone)
             return {
                 isPerfect: false,
                 powerMultiplier: 0.7,
-                spinMultiplier: 1.2,
-                angleOffset: (Math.random() - 0.5) * 0.2,
-                accuracyBonus: -0.1
+                spinMultiplier: 0.8,
+                angleOffset: 0
             };
         }
     }
@@ -656,8 +698,19 @@ class BasketballGame {
         requestAnimationFrame(shakeAnimation);
     }
 
-    showReleaseIndicator(isPerfect) {
+    showReleaseIndicator(isPerfect, power) {
         const indicator = document.createElement('div');
+        let releaseText = isPerfect ? 'PERFECT RELEASE!' : 'RELEASE!';
+        
+        // Add power indicator with more granular early release feedback
+        let powerText = '';
+        if (power < 0.2) powerText = 'No Power!';
+        else if (power < 0.4) powerText = 'Way Too Weak!';
+        else if (power < 0.6) powerText = 'Too Weak!';
+        else if (power < 0.8) powerText = 'Weak';
+        else if (power < 0.95) powerText = 'Good Power';
+        else powerText = 'Strong!';
+        
         indicator.style.cssText = `
             position: fixed;
             left: 50%;
@@ -668,8 +721,15 @@ class BasketballGame {
             text-shadow: 0 0 10px ${isPerfect ? '#44ff44' : '#ffffff'};
             opacity: 1;
             transition: opacity 0.5s, transform 0.5s;
+            text-align: center;
         `;
-        indicator.textContent = isPerfect ? 'PERFECT RELEASE!' : 'RELEASE!';
+        
+        // Create two lines of text
+        indicator.innerHTML = `
+            <div>${releaseText}</div>
+            <div style="font-size: 18px; margin-top: 5px;">${powerText}</div>
+        `;
+        
         document.body.appendChild(indicator);
         
         setTimeout(() => {
@@ -682,28 +742,33 @@ class BasketballGame {
     animateShot() {
         if (!this.playerState.shootingAnimation) return;
 
-        // Simple jump animation for shooting
-        const jumpUp = () => {
-            this.playerState.position.y += 0.2;
-            // Slight knee bend
-            this.leftUpperLeg.position.y = 0.75;
-            this.leftLowerLeg.position.y = 0.35;
-            this.rightUpperLeg.position.y = 0.75;
-            this.rightLowerLeg.position.y = 0.35;
+        // Store initial arm rotations
+        const initialLeftArmRotation = this.leftArm.rotation.z;
+        const initialRightArmRotation = this.rightArm.rotation.z;
+
+        // Shooting animation sequence
+        const prepareShot = () => {
+            // Move arms back for shot preparation
+            this.leftArm.rotation.z = Math.PI / 2;
+            this.rightArm.rotation.z = -Math.PI / 2;
+        };
+
+        const releaseShot = () => {
+            // Extend arms forward for shot release
+            this.leftArm.rotation.z = 0;
+            this.rightArm.rotation.z = 0;
         };
 
         const resetPosition = () => {
-            this.playerState.position.y = 0;
-            // Reset legs
-            this.leftUpperLeg.position.y = 0.8;
-            this.leftLowerLeg.position.y = 0.4;
-            this.rightUpperLeg.position.y = 0.8;
-            this.rightLowerLeg.position.y = 0.4;
+            // Reset arms to default position
+            this.leftArm.rotation.z = initialLeftArmRotation;
+            this.rightArm.rotation.z = initialRightArmRotation;
             this.playerState.shootingAnimation = false;
         };
 
         // Execute animation sequence
-        jumpUp();
+        prepareShot();
+        setTimeout(releaseShot, 100);
         setTimeout(resetPosition, 300);
     }
 
@@ -804,10 +869,12 @@ class BasketballGame {
         this.ball.position.copy(this.ballBody.position);
         this.ball.quaternion.copy(this.ballBody.quaternion);
 
-        // Reset ball if it goes out of bounds
-        if (Math.abs(this.ball.position.x) > 15 ||
-            Math.abs(this.ball.position.z) > 15 ||
-            this.ball.position.y < 0) {
+        // Reset ball only if it's very far out of bounds or below the floor
+        const farOutOfBounds = Math.abs(this.ball.position.x) > 25 ||
+                             Math.abs(this.ball.position.z) > 25;
+        const belowFloor = this.ball.position.y < -2;
+        
+        if (farOutOfBounds || belowFloor) {
             this.resetBall();
         }
     }
@@ -815,7 +882,7 @@ class BasketballGame {
     resetBall() {
         if (!this.player) return; // Safety check
 
-        // Reset ball to player's hands position
+        // Reset ball to player's hands position based on shooting stance
         const handOffset = this.player.rotation.y === Math.PI / 2 ? -0.5 : // Left
                           this.player.rotation.y === -Math.PI / 2 ? 0.5 : // Right
                           this.player.rotation.y === Math.PI ? 0 : // Backward
@@ -825,9 +892,10 @@ class BasketballGame {
                        this.player.rotation.y === Math.PI ? 0.5 : // Backward
                        0; // Left/Right
         
+        // Position ball at the shooting hand (right hand)
         this.ballBody.position.set(
             this.playerState.position.x + handOffset,
-            1.5, // Higher position in hands
+            1.4, // Align with arms
             this.playerState.position.z + zOffset
         );
         this.ballBody.velocity.set(0, 0, 0);
@@ -888,14 +956,23 @@ class BasketballGame {
                 Math.pow(playerPos.x - ballPos.x, 2) +
                 Math.pow(playerPos.z - ballPos.z, 2)
             );
+
+            // Only allow pickup if ball is near ground and moving slowly
+            const ballVelocity = new THREE.Vector3(
+                this.ballBody.velocity.x,
+                this.ballBody.velocity.y,
+                this.ballBody.velocity.z
+            );
+            const isSlowEnough = ballVelocity.length() < 2; // Ball is moving slowly
+            const isNearGround = ballPos.y < 1.5;
             
-            if (distance < pickupDistance && ballPos.y < 2) {
+            if (distance < pickupDistance && isNearGround && isSlowEnough) {
                 this.resetBall();
             }
         }
 
-        // Update ball position if not shot
-        if (!this.isShot) {
+        // Update ball position only if we're holding it (not shot)
+        if (!this.isShot && !this.playerState.shootingAnimation) {
             const handOffset = this.player.rotation.y === Math.PI / 2 ? -0.4 : // Left
                              this.player.rotation.y === -Math.PI / 2 ? 0.4 : // Right
                              this.player.rotation.y === Math.PI ? 0 : // Backward
@@ -905,9 +982,14 @@ class BasketballGame {
                           this.player.rotation.y === Math.PI ? 0.4 : // Backward
                           0; // Left/Right
 
+            // Position ball at the shooting hand (right hand)
+            const ballHeight = this.playerState.isJumping ? 
+                             this.playerState.position.y + 1.4 : // Keep relative to player while jumping
+                             1.4; // Normal height
+
             this.ballBody.position.set(
                 this.playerState.position.x + handOffset,
-                this.playerState.position.y + 1.2, // Adjust ball height based on player height
+                ballHeight,
                 this.playerState.position.z + zOffset
             );
             this.ballBody.velocity.set(0, 0, 0);
@@ -933,7 +1015,7 @@ class BasketballGame {
 
         // Update power meter with smoother increment
         if (this.isPoweringUp) {
-            this.shotMeterProgress = Math.min(1, this.shotMeterProgress + this.shotMeterSpeed * 0.016);
+            this.shotMeterProgress = Math.min(1, this.shotMeterProgress + this.shotMeterSpeed * delta);
             this.shotMeterFill.style.height = `${this.shotMeterProgress * 100}%`;
         }
 
@@ -954,10 +1036,23 @@ class BasketballGame {
 
         window.addEventListener('keydown', (e) => {
             switch(e.key.toLowerCase()) {
-                case 'arrowleft': this.keys.left = true; break;
-                case 'arrowright': this.keys.right = true; break;
-                case 'arrowup': this.keys.up = true; break;
-                case 'arrowdown': this.keys.down = true; break;
+                // Arrow keys and WASD
+                case 'arrowleft': 
+                case 'a':
+                    this.keys.left = true; 
+                    break;
+                case 'arrowright':
+                case 'd': 
+                    this.keys.right = true; 
+                    break;
+                case 'arrowup':
+                case 'w': 
+                    this.keys.up = true; 
+                    break;
+                case 'arrowdown':
+                case 's': 
+                    this.keys.down = true; 
+                    break;
                 case ' ':
                     if (this.playerState.onGround) {
                         this.playerState.isJumping = true;
@@ -973,23 +1068,37 @@ class BasketballGame {
                         this.shotMeterFill.style.height = '0%';
                     }
                     break;
+                case 'r':
+                    this.rebound();
+                    break;
             }
         });
 
         window.addEventListener('keyup', (e) => {
             switch(e.key.toLowerCase()) {
-                case 'arrowleft': this.keys.left = false; break;
-                case 'arrowright': this.keys.right = false; break;
-                case 'arrowup': this.keys.up = false; break;
-                case 'arrowdown': this.keys.down = false; break;
+                case 'arrowleft':
+                case 'a': 
+                    this.keys.left = false; 
+                    break;
+                case 'arrowright':
+                case 'd': 
+                    this.keys.right = false; 
+                    break;
+                case 'arrowup':
+                case 'w': 
+                    this.keys.up = false; 
+                    break;
+                case 'arrowdown':
+                case 's': 
+                    this.keys.down = false; 
+                    break;
                 case 'e':
                     if (this.isPoweringUp) {
                         this.isPoweringUp = false;
+                        this.shotMeter.style.display = 'none';
                         if (this.shotMeterProgress > 0) {
                             this.shoot();
                         }
-                        this.shotMeterProgress = 0;
-                        this.shotMeterFill.style.height = '0%';
                     }
                     break;
             }
@@ -1001,6 +1110,48 @@ class BasketballGame {
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(window.innerWidth, window.innerHeight);
         });
+    }
+
+    rebound() {
+        if (!this.isShot) return; // Only reset if ball is in play
+
+        // Reset ball to player's hands
+        this.resetBall();
+
+        // Add a small visual effect
+        this.showReboundEffect();
+    }
+
+    showReboundEffect() {
+        // Create a circular wave effect at player's position
+        const geometry = new THREE.RingGeometry(0, 2, 32);
+        const material = new THREE.MeshBasicMaterial({ 
+            color: 0x44ff44,
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.DoubleSide
+        });
+        
+        const wave = new THREE.Mesh(geometry, material);
+        wave.rotation.x = -Math.PI / 2;
+        wave.position.copy(this.playerState.position);
+        wave.position.y = 0.1; // Slightly above ground
+        this.scene.add(wave);
+
+        // Animate the wave
+        const startTime = Date.now();
+        const animate = () => {
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (elapsed < 0.5) {
+                wave.scale.x = wave.scale.y = 1 + elapsed * 2;
+                material.opacity = 0.5 * (1 - elapsed * 2);
+                requestAnimationFrame(animate);
+            } else {
+                this.scene.remove(wave);
+            }
+        };
+        
+        animate();
     }
 }
 
