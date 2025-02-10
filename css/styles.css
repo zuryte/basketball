@@ -37,4 +37,44 @@ html, body {
     font-weight: bold;
     text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
     z-index: 10;
+}
+
+.keybindings {
+    position: absolute;
+    bottom: 10px;
+    right: 10px;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 8px;
+    border-radius: 4px;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 11px;
+    z-index: 10;
+}
+
+.keybindings h3 {
+    display: none;
+}
+
+.keybind {
+    margin: 2px 0;
+    display: flex;
+    align-items: center;
+    opacity: 0.8;
+}
+
+.key {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 0 4px;
+    border-radius: 2px;
+    margin-right: 4px;
+    font-family: monospace;
+    font-size: 10px;
+    min-width: 32px;
+    text-align: center;
+}
+
+.keybind.debug {
+    opacity: 0.5;
+    font-style: italic;
+    margin-top: 4px;
 } 
