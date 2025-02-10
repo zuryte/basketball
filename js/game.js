@@ -303,12 +303,74 @@ class BasketballGame {
         this.net.position.set(0, 2.2, -8.5);
         this.scene.add(this.net);
 
+        // Support pole structure
+        const poleMaterial = new THREE.MeshStandardMaterial({
+            color: 0x2c3e50,  // Dark blue-grey color
+            roughness: 0.7,
+            metalness: 0.3
+        });
+
+        // Main vertical pole
+        const mainPoleGeometry = new THREE.CylinderGeometry(0.15, 0.15, 3, 16);  // Changed from 6 to 3
+        const mainPole = new THREE.Mesh(mainPoleGeometry, poleMaterial);
+        mainPole.position.set(0, 1.5, -9.5);  // Changed y from 3 to 1.5 to center the shorter pole
+        mainPole.castShadow = true;
+        this.scene.add(mainPole);
+
+        // Horizontal extension (the part that extends from the pole to the backboard)
+        const horizontalPoleGeometry = new THREE.CylinderGeometry(0.1, 0.1, 0.7, 16);
+        const horizontalPole = new THREE.Mesh(horizontalPoleGeometry, poleMaterial);
+        horizontalPole.rotation.z = Math.PI / 2;
+        horizontalPole.position.set(0, 3, -9.15);
+        horizontalPole.castShadow = true;
+        this.scene.add(horizontalPole);
+
+        // Support brackets (connecting horizontal to backboard)
+        const bracketMaterial = new THREE.MeshStandardMaterial({
+            color: 0x34495e,  // Slightly darker than the pole
+            roughness: 0.8,
+            metalness: 0.4
+        });
+
+        // Upper bracket
+        const upperBracketGeometry = new THREE.BoxGeometry(0.8, 0.1, 0.1);
+        const upperBracket = new THREE.Mesh(upperBracketGeometry, bracketMaterial);
+        upperBracket.position.set(0, 3.5, -9.05);
+        upperBracket.castShadow = true;
+        this.scene.add(upperBracket);
+
+        // Lower bracket
+        const lowerBracketGeometry = new THREE.BoxGeometry(0.8, 0.1, 0.1);
+        const lowerBracket = new THREE.Mesh(lowerBracketGeometry, bracketMaterial);
+        lowerBracket.position.set(0, 2.5, -9.05);
+        lowerBracket.castShadow = true;
+        this.scene.add(lowerBracket);
+
+        // Base support (wider base at the bottom)
+        const baseGeometry = new THREE.CylinderGeometry(0.3, 0.4, 0.4, 16);
+        const baseMaterial = new THREE.MeshStandardMaterial({
+            color: 0x2c3e50,
+            roughness: 0.9,
+            metalness: 0.2
+        });
+        const base = new THREE.Mesh(baseGeometry, baseMaterial);
+        base.position.set(0, 0.2, -9.5);
+        base.castShadow = true;
+        this.scene.add(base);
+
         // Physics bodies for hoop
         const backboardShape = new CANNON.Box(new CANNON.Vec3(1.5, 1, 0.05));
         const backboardBody = new CANNON.Body({ mass: 0 });
         backboardBody.addShape(backboardShape);
         backboardBody.position.set(0, 3, -9);
         this.world.addBody(backboardBody);
+
+        // Pole physics (simplified collision box)
+        const poleShape = new CANNON.Box(new CANNON.Vec3(0.15, 3, 0.15));
+        const poleBody = new CANNON.Body({ mass: 0 });
+        poleBody.addShape(poleShape);
+        poleBody.position.set(0, 3, -9.5);
+        this.world.addBody(poleBody);
 
         // Rim physics (using a collection of small boxes)
         const rimSegments = 8;
@@ -542,138 +604,126 @@ class BasketballGame {
         this.animateShot();
         this.isShot = true;
 
-        // Get the release quality which affects power
-        const releaseQuality = this.calculateReleaseQuality();
-        
-        // Base shot parameters - reduced speeds and power
-        const SHOT_SPEED = 12;  // Reduced from 15
-        const MIN_POWER = 0.3;  // Lower minimum power
-        const MAX_POWER = 0.9;  // Lower maximum power
-        const SHOT_HEIGHT = 5;  // Lower arc height
-        
-        // Calculate power from shot meter with a minimum, affected by release quality
-        const rawPower = this.shotMeterProgress;
-        const powerFactor = Math.max(MIN_POWER, 
-            Math.min(MAX_POWER, 
-                rawPower * releaseQuality.powerMultiplier
-            )
-        );
-        
         // Calculate direction to basket (at rim position)
-        const basketPosition = new THREE.Vector3(0, 2.5, -8.5); // Rim position
+        const basketPosition = new THREE.Vector3(0, 2.5, -8.5);
         const shotDirection = new THREE.Vector3();
         shotDirection.subVectors(basketPosition, this.playerState.position).normalize();
 
-        // Calculate distance to basket for arc adjustment
+        // Calculate distance to basket
         const distanceToBasket = new THREE.Vector2(
             this.playerState.position.x - basketPosition.x,
             this.playerState.position.z - basketPosition.z
         ).length();
 
-        // For perfect releases, ensure perfect trajectory
-        if (releaseQuality.isPerfect) {
-            // Calculate optimal trajectory for a perfect shot
-            const gravity = 9.82;
-            
-            // Calculate optimal time based on distance (longer distance = longer time)
-            const time = Math.sqrt(2 * distanceToBasket / 5);
-            
-            // Calculate required horizontal velocity to reach basket in calculated time
-            const horizontalSpeed = distanceToBasket / time;
-            
-            // Calculate required vertical velocity for perfect arc
-            // Using physics formula: y = v0*t - (1/2)gt^2
-            // At peak: 0 = v0*(t/2) - (1/2)g*(t/2)^2
-            // Solve for v0
-            const verticalSpeed = (gravity * time) / 2;
-            
-            // Set the final velocity for perfect shot
-            const velocity = new CANNON.Vec3(
-                shotDirection.x * horizontalSpeed,
-                verticalSpeed,
-                shotDirection.z * horizontalSpeed
-            );
-            
-            this.ballBody.velocity.copy(velocity);
-        } else {
-            // Only add spread for non-perfect releases
-            const tinySpread = 0.02;
-            shotDirection.x += (Math.random() - 0.5) * tinySpread;
-            shotDirection.z += (Math.random() - 0.5) * tinySpread;
-            shotDirection.normalize();
-            
-            // Scale down shot parameters based on power factor
-            const scaledShotSpeed = SHOT_SPEED * Math.pow(powerFactor, 1.5); // More aggressive power scaling
-            const scaledHeight = SHOT_HEIGHT * Math.pow(powerFactor, 1.5);   // Scale height with same curve
-            
-            // Calculate the shot arc with scaled parameters
-            const horizontalSpeed = scaledShotSpeed * (1 + distanceToBasket * 0.02);
-            const gravity = 9.82;
-            const verticalSpeed = Math.sqrt(2 * gravity * scaledHeight);
-            
-            // Set the final velocity
-            const velocity = new CANNON.Vec3(
-                shotDirection.x * horizontalSpeed,
-                verticalSpeed,
-                shotDirection.z * horizontalSpeed
-            );
-            
-            this.ballBody.velocity.copy(velocity);
-        }
+        // Get the release quality which affects power
+        const releaseQuality = this.calculateReleaseQuality(distanceToBasket);
         
-        // Add minimal spin for visual effect
-        const spinForce = 1.5 * releaseQuality.spinMultiplier;  // Reduced spin
-        this.ballBody.angularVelocity.set(
-            0,
-            -spinForce,
-            0
+        // Calculate distance-based compensation
+        const BASE_DISTANCE = 5; // Reference distance for normalization
+        const MAX_COMPENSATION = 1.15; // Maximum power compensation
+        
+        // Smooth scaling based on distance ratio, with a cap
+        const distanceRatio = distanceToBasket / BASE_DISTANCE;
+        const distanceCompensation = Math.min(MAX_COMPENSATION, 1 + Math.log10(distanceRatio) * 0.1);
+
+        // Using projectile motion equation for perfect velocity:
+        // v0^2 = (g * d^2) / (2 * cos^2(θ) * (d * tan(θ) - (h - h0)))
+        const g = 9.81; // gravity (m/s^2)
+        const h0 = this.playerState.position.y + 1.4; // initial height (player's hands)
+        const h = basketPosition.y; // target height (basket)
+        const d = distanceToBasket; // horizontal distance to target
+
+        const perfectVelocity = Math.sqrt(
+            (g * d * d) / 
+            (2 * Math.cos(releaseQuality.optimalAngle) * Math.cos(releaseQuality.optimalAngle) * 
+            (d * Math.tan(releaseQuality.optimalAngle) - (h - h0)))
         );
         
-        // Visual feedback
-        const isPerfect = releaseQuality.isPerfect;
-        this.showReleaseIndicator(isPerfect, powerFactor);
+        // Apply power multiplier with distance compensation
+        const actualVelocity = perfectVelocity * releaseQuality.powerMultiplier * distanceCompensation;
         
-        // Screen shake for powerful shots
-        if (powerFactor > 0.8) {
-            this.addScreenShake(0.15 * powerFactor, 100);  // Reduced shake
+        // Calculate velocity components
+        const vx = actualVelocity * Math.cos(releaseQuality.optimalAngle);
+        const vy = actualVelocity * Math.sin(releaseQuality.optimalAngle);
+
+        // Set the final velocity
+        const velocity = new CANNON.Vec3(
+            shotDirection.x * vx,
+            vy,
+            shotDirection.z * vx
+        );
+        
+        this.ballBody.velocity.copy(velocity);
+
+        // Add spin - more predictable now
+        const spinForce = releaseQuality.isPerfect ? 1.5 : 1.0;
+        this.ballBody.angularVelocity.set(
+            0,              // no random x-axis spin
+            -spinForce,     // consistent backspin
+            0               // no random z-axis spin
+        );
+
+        // Visual feedback
+        this.showReleaseIndicator(releaseQuality.isPerfect, releaseQuality.powerMultiplier, releaseQuality.shotResult);
+        
+        // Screen shake only for very strong shots
+        if (releaseQuality.powerMultiplier > 1.3) {
+            this.addScreenShake(0.1, 100);
         }
     }
 
-    calculateReleaseQuality() {
+    calculateReleaseQuality(distanceToBasket) {
         const progress = this.shotMeterProgress;
-        const isPerfect = progress >= this.perfectReleaseZone.start && progress <= this.perfectReleaseZone.end;
+        const perfectStart = this.perfectReleaseZone.start;
+        const perfectEnd = this.perfectReleaseZone.end;
+        const perfectMiddle = (perfectStart + perfectEnd) / 2;
         
-        if (isPerfect) {
+        // Perfect release = exactly 1.0 power
+        if (progress >= perfectStart && progress <= perfectEnd) {
             return {
                 isPerfect: true,
-                powerMultiplier: 1,
-                spinMultiplier: 1,
-                angleOffset: 0
-            };
-        } else if (progress < this.perfectReleaseZone.start) {
-            // Linear scaling for early releases
-            // If released at 0, power is 0.1x
-            // If released just before perfect zone, power is 0.7x
-            const minPower = 0.1;
-            const maxPower = 0.7;
-            const powerScale = (progress / this.perfectReleaseZone.start);
-            const powerMultiplier = minPower + (maxPower - minPower) * powerScale;
-            
-            return {
-                isPerfect: false,
-                powerMultiplier: powerMultiplier,
-                spinMultiplier: 0.6,
-                angleOffset: 0
-            };
-        } else {
-            // Late release (after perfect zone)
-            return {
-                isPerfect: false,
-                powerMultiplier: 0.7,
-                spinMultiplier: 0.8,
-                angleOffset: 0
+                powerMultiplier: 1.0,
+                shotResult: 'PERFECT!',
+                optimalAngle: Math.PI / 4
             };
         }
+        
+        // Linear power scaling
+        let powerMultiplier, shotResult;
+        
+        if (progress < perfectStart) {
+            // Linear scaling from 0.7 to 0.95 for weak shots
+            powerMultiplier = 0.7 + (progress / perfectStart) * 0.25;
+            
+            // Calculate how weak the shot is
+            const weakness = (perfectStart - progress) / perfectStart;
+            if (weakness > 0.66) shotResult = 'WAY TOO WEAK!';
+            else if (weakness > 0.33) shotResult = 'TOO WEAK!';
+            else shotResult = 'SLIGHTLY WEAK';
+            
+        } else {
+            // Linear scaling from 1.05 to 1.3 for strong shots
+            const excessProgress = (progress - perfectEnd) / (1 - perfectEnd);
+            powerMultiplier = 1.05 + excessProgress * 0.25;
+            
+            // Calculate how strong the shot is
+            const strength = (progress - perfectEnd) / (1 - perfectEnd);
+            if (strength > 0.66) shotResult = 'WAY TOO STRONG!';
+            else if (strength > 0.33) shotResult = 'TOO STRONG!';
+            else shotResult = 'SLIGHTLY STRONG';
+        }
+        
+        // Calculate optimal angle based on distance
+        // Closer shots need steeper angles
+        const baseAngle = Math.PI / 4; // 45 degrees base
+        const optimalAngle = baseAngle + Math.min(0.2, distanceToBasket * 0.01); // Slight angle adjustment for distance
+        
+        return {
+            isPerfect: false,
+            powerMultiplier,
+            shotResult,
+            optimalAngle
+        };
     }
 
     addScreenShake(intensity, duration) {
@@ -698,18 +748,18 @@ class BasketballGame {
         requestAnimationFrame(shakeAnimation);
     }
 
-    showReleaseIndicator(isPerfect, power) {
+    showReleaseIndicator(isPerfect, powerMultiplier, shotResult) {
         const indicator = document.createElement('div');
-        let releaseText = isPerfect ? 'PERFECT RELEASE!' : 'RELEASE!';
         
-        // Add power indicator with more granular early release feedback
-        let powerText = '';
-        if (power < 0.2) powerText = 'No Power!';
-        else if (power < 0.4) powerText = 'Way Too Weak!';
-        else if (power < 0.6) powerText = 'Too Weak!';
-        else if (power < 0.8) powerText = 'Weak';
-        else if (power < 0.95) powerText = 'Good Power';
-        else powerText = 'Strong!';
+        // Calculate distance to basket for context
+        const basketPosition = new THREE.Vector3(0, 2.5, -8.5);
+        const distanceToBasket = new THREE.Vector2(
+            this.playerState.position.x - basketPosition.x,
+            this.playerState.position.z - basketPosition.z
+        ).length();
+
+        // Format power percentage
+        const powerPercentage = Math.round(powerMultiplier * 100);
         
         indicator.style.cssText = `
             position: fixed;
@@ -724,10 +774,11 @@ class BasketballGame {
             text-align: center;
         `;
         
-        // Create two lines of text
+        // Create three lines of text
         indicator.innerHTML = `
-            <div>${releaseText}</div>
-            <div style="font-size: 18px; margin-top: 5px;">${powerText}</div>
+            <div>${shotResult}</div>
+            <div style="font-size: 18px; margin-top: 5px;">Power: ${powerPercentage}%</div>
+            <div style="font-size: 16px; margin-top: 5px;">Distance: ${Math.round(distanceToBasket * 10) / 10}m</div>
         `;
         
         document.body.appendChild(indicator);
@@ -736,7 +787,7 @@ class BasketballGame {
             indicator.style.opacity = '0';
             indicator.style.transform = 'translate(-50%, -100%)';
             setTimeout(() => indicator.remove(), 500);
-        }, 500);
+        }, 1000);
     }
 
     animateShot() {
@@ -777,14 +828,24 @@ class BasketballGame {
             const ballPos = this.ball.position;
             const rimPos = this.rim.position;
             
-            if (Math.abs(ballPos.x - rimPos.x) < 0.45 &&
-                Math.abs(ballPos.z - rimPos.z) < 0.45 &&
-                Math.abs(ballPos.y - rimPos.y) < 0.1) {
-                
+            // Check if ball is within rim radius
+            const isWithinRimRadius = Math.abs(ballPos.x - rimPos.x) < 0.45 &&
+                                    Math.abs(ballPos.z - rimPos.z) < 0.45;
+            
+            // Check if ball is at rim height
+            const isAtRimHeight = Math.abs(ballPos.y - rimPos.y) < 0.1;
+            
+            // Track if ball is above rim
+            if (isWithinRimRadius && ballPos.y > rimPos.y + 0.1) {
+                this.ballAboveRim = true;
+            }
+            
+            // Only score if ball was above rim first and is now passing through
+            if (this.ballAboveRim && isWithinRimRadius && isAtRimHeight && this.ballBody.velocity.y < 0) {
                 this.ballPassedThroughHoop = true;
                 this.score += this.isThreePointer() ? 3 : 2;
                 this.scoreDisplay.textContent = this.score;
-                this.updateScoreboardDisplay(); // Update the 3D scoreboard
+                this.updateScoreboardDisplay();
                 this.createScoreEffect();
             }
         }
@@ -1066,6 +1127,13 @@ class BasketballGame {
                         this.shotMeterProgress = 0;
                         this.shotMeter.style.display = 'block';
                         this.shotMeterFill.style.height = '0%';
+                    }
+                    break;
+                case 'h':
+                    if (!this.isShot) {
+                        // Debug perfect shot
+                        this.shotMeterProgress = (this.perfectReleaseZone.start + this.perfectReleaseZone.end) / 2; // Exactly middle of perfect zone
+                        this.shoot();
                     }
                     break;
                 case 'r':
